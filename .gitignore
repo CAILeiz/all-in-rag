@@ -71,3 +71,18 @@ rag/
 # LLM API keys
 *.key
 *.secret
+
+# 本地跑通产生的运行产物（可随时重跑再生成）
+code/logs/
+code/volumes/
+code/C3/faiss_index_store/
+code/C3/llamaindex_index_store/
+code/C4/text2sql_demo.db
+data/C3/search_result.png
+data/C4/*_search*.png
+
+code/C4/*.db
+
+# 本机模型/NLTK 缓存与日志
+.cache/
+code/logs/
