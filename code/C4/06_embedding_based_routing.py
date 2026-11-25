@@ -1,3 +1,13 @@
+import os as _os, sys as _sys
+# 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
+_p = _os.path.dirname(_os.path.abspath(__file__))
+while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "bootstrap.py")):
+    _p = _os.path.dirname(_p)
+_sys.path.insert(0, _p)
+import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、修代理与证书
+bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+from llm_config import llm_kwargs
+
 import os
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -20,11 +30,7 @@ route_prompt_embeddings = embeddings.embed_documents(route_prompts)
 print(f"已定义 {len(route_names)} 个路由: {', '.join(route_names)}")
 
 # 2. 定义不同路由的目标链
-llm = ChatDeepSeek(
-    model="deepseek-chat", 
-    temperature=0, 
-    api_key=os.getenv("DEEPSEEK_API_KEY")
-    )
+llm = ChatDeepSeek(temperature=0, **llm_kwargs())
 
 # 定义川菜和粤菜处理链
 sichuan_chain = (

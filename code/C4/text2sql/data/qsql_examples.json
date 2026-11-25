@@ -58,5 +58,10 @@
     "question": "查询平均订单金额",
     "sql": "SELECT AVG(total_amount) as avg_order_amount FROM (SELECT o.id, SUM(oi.quantity * oi.unit_price) as total_amount FROM orders o JOIN order_items oi ON o.id = oi.order_id GROUP BY o.id) as order_totals",
     "database": "ecommerce"
+  },
+  {
+    "question": "统计每个城市的用户数量",
+    "sql": "SELECT city, COUNT(*) as user_count FROM users GROUP BY city",
+    "database": "ecommerce"
   }
-] 
+]

@@ -1,3 +1,12 @@
+import os as _os, sys as _sys
+# 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
+_p = _os.path.dirname(_os.path.abspath(__file__))
+while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "bootstrap.py")):
+    _p = _os.path.dirname(_p)
+_sys.path.insert(0, _p)
+import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、固定缓存目录、修代理与证书
+bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+
 import os
 import json
 import sqlite3

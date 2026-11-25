@@ -1,3 +1,12 @@
+import os as _os, sys as _sys
+# 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
+_p = _os.path.dirname(_os.path.abspath(__file__))
+while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "bootstrap.py")):
+    _p = _os.path.dirname(_p)
+_sys.path.insert(0, _p)
+import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、修代理与证书
+from llm_config import llm_kwargs
+
 import os
 from typing import List, Dict, Any
 from langchain_deepseek import ChatDeepSeek
@@ -8,11 +17,10 @@ class SimpleSQLGenerator:
     """简化的SQL生成器"""
     
     def __init__(self, api_key: str = None):
-        self.llm = ChatDeepSeek(
-            model="deepseek-chat",
-            temperature=0,
-            api_key=api_key or os.getenv("DEEPSEEK_API_KEY")
-        )
+        kwargs = llm_kwargs()
+        if api_key:
+            kwargs["api_key"] = api_key
+        self.llm = ChatDeepSeek(temperature=0, **kwargs)
     
     def generate_sql(self, user_query: str, knowledge_results: List[Dict[str, Any]]) -> str:
         """生成SQL语句"""

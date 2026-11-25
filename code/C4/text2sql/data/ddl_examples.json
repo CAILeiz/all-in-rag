@@ -1,7 +1,7 @@
 [
   {
     "table_name": "users",
-    "ddl_statement": "CREATE TABLE users (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL, email VARCHAR(150) UNIQUE, age INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+    "ddl_statement": "CREATE TABLE users (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL, email VARCHAR(150) UNIQUE, age INT, city VARCHAR(50), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
     "description": "用户信息表，存储用户基本信息"
   },
   {

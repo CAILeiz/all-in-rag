@@ -1,3 +1,13 @@
+import os as _os, sys as _sys
+# 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
+_p = _os.path.dirname(_os.path.abspath(__file__))
+while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "bootstrap.py")):
+    _p = _os.path.dirname(_p)
+_sys.path.insert(0, _p)
+import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、修代理与证书
+bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+from llm_config import llm_kwargs
+
 import os
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import ContextualCompressionRetriever
@@ -134,11 +144,7 @@ hf_bge_embeddings = HuggingFaceBgeEmbeddings(
     model_name="BAAI/bge-large-zh-v1.5"
 )
 
-llm = ChatDeepSeek(
-    model="deepseek-chat", 
-    temperature=0.1, 
-    api_key=os.getenv("DEEPSEEK_API_KEY")
-)
+llm = ChatDeepSeek(temperature=0.1, **llm_kwargs())
 
 # 1. 加载和处理文档
 loader = TextLoader("../../data/C4/txt/ai.txt", encoding="utf-8")
@@ -154,7 +160,36 @@ base_retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
 reranker = ColBERTReranker()
 
 # 4. 设置LLM压缩器
-compressor = LLMChainExtractor.from_llm(llm)
+# 注意：LLMChainExtractor 自带的提示词是英文的（"...extract any part of the context AS IS..."），
+# 中文场景下小模型（如本地 3B）经常直接返回空串，导致压缩后一条不剩。
+# 这里换成中文提示词，并要求「无相关内容」时输出固定词，便于过滤。
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+_EXTRACT_PROMPT = PromptTemplate.from_template(
+    """下面是一段文档摘录。请从中摘抄出与问题相关的句子，**原样照抄、不要改写**。
+如果整段都不相关，只输出：无
+
+问题：{question}
+摘录：
+{context}
+
+摘抄结果："""
+)
+
+class ChineseExtractCompressor(LLMChainExtractor):
+    """在 LLMChainExtractor 基础上过滤掉「无」这类占位输出。
+
+    基类只判断 len(output) == 0，而中文提示词让模型输出「无」时长度不为 0，
+    于是「无相关」的文档也会被当成结果返回。
+    """
+
+    def compress_documents(self, documents, query, callbacks=None):
+        out = super().compress_documents(documents, query, callbacks=callbacks)
+        return [d for d in out if d.page_content.strip() not in ("无", "无。", "NONE", "NO_OUTPUT")]
+
+
+compressor = ChineseExtractCompressor.from_llm(llm, prompt=_EXTRACT_PROMPT)
 
 # 5. 使用DocumentCompressorPipeline组装压缩管道
 # 流程: ColBERT重排 -> LLM压缩

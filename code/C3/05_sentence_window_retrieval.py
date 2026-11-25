@@ -1,3 +1,13 @@
+import os as _os, sys as _sys
+# 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
+_p = _os.path.dirname(_os.path.abspath(__file__))
+while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "bootstrap.py")):
+    _p = _os.path.dirname(_p)
+_sys.path.insert(0, _p)
+import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、修代理与证书
+bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+from llm_config import openai_llm_kwargs
+
 import os
 from llama_index.core.node_parser import SentenceWindowNodeParser, SentenceSplitter
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
@@ -6,7 +16,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.postprocessor import MetadataReplacementPostProcessor
 
 # 1. 配置模型
-Settings.llm = DeepSeek(model="deepseek-chat", temperature=0.1, api_key=os.getenv("DEEPSEEK_API_KEY"))
+Settings.llm = DeepSeek(temperature=0.1, **openai_llm_kwargs())
 Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en")
 
 # 2. 加载文档

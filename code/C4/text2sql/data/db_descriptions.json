@@ -7,6 +7,7 @@
       {"name": "name", "description": "用户姓名，不能为空", "type": "VARCHAR(100)"},
       {"name": "email", "description": "用户邮箱地址，必须唯一", "type": "VARCHAR(150)"},
       {"name": "age", "description": "用户年龄", "type": "INT"},
+      {"name": "city", "description": "用户所在城市", "type": "VARCHAR(50)"},
       {"name": "created_at", "description": "用户注册时间", "type": "TIMESTAMP"}
     ]
   },
