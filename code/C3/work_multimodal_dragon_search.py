@@ -6,6 +6,7 @@ while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "boot
 _sys.path.insert(0, _p)
 import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、固定缓存目录、修代理与证书
 bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+from stage_log import Stage
 
 import json
 import os
@@ -142,169 +143,207 @@ METADATA_PATH = "../../data/C4/metadata/dragon.json"
 COLLECTION_NAME = "multimodal_dragon_demo"
 MILVUS_URI = "http://localhost:19530"
 
-# 2. 初始化数据集和编码器
-print("--> 正在初始化数据集...")
-dataset = DragonDataset(DATA_DIR, METADATA_PATH)
-print(f"加载了 {len(dataset.images)} 张龙类图像")
+OUTPUT_FIELDS = ["img_id", "image_path", "title", "description",
+                 "category", "location", "environment"]
 
-print("--> 正在初始化编码器和Milvus客户端...")
-encoder = Encoder(MODEL_NAME, MODEL_PATH)
-milvus_client = MilvusClient(uri=MILVUS_URI)
+stage = Stage(total=8, title="C3 · 多模态龙类检索（work）")
+stage.header("多模态向量入库 → 三种查询方式对比（图+文 / 纯文 / 纯图）")
 
-# 3. 创建 Milvus Collection
-print(f"\n--> 正在创建 Collection '{COLLECTION_NAME}'")
-if milvus_client.has_collection(COLLECTION_NAME):
-    milvus_client.drop_collection(COLLECTION_NAME)
-    print(f"已删除已存在的 Collection: '{COLLECTION_NAME}'")
+# ---------------------------------------------------------------- 1. 数据集
+with stage.step(
+    "加载数据集",
+    data_dir=DATA_DIR,
+    metadata=METADATA_PATH,
+    why="每张图除了向量，还带 title/description/category 等元数据，检索后一并取回",
+) as step:
+    dataset = DragonDataset(DATA_DIR, METADATA_PATH)
+    step.detail(f"共 {len(dataset.images)} 张龙类图像")
+    for img in dataset.images[:3]:
+        step.detail(f"  · {img.title}（{img.category}）")
+    step.note(f"{len(dataset.images)} 张")
 
-# 获取向量维度
-sample_text = dataset.get_text_content(dataset.images[0])
-sample_path = dataset.images[0].path
-dim = len(encoder.encode_multimodal(sample_path, sample_text))
+# ---------------------------------------------------------------- 2. 编码器
+with stage.step(
+    "加载编码器 + 连接 Milvus",
+    model=MODEL_NAME,
+    uri=MILVUS_URI,
+) as step:
+    encoder = Encoder(MODEL_NAME, MODEL_PATH)
+    milvus_client = MilvusClient(uri=MILVUS_URI)
+    step.note("已连接")
 
-fields = [
-    FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-    FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=dim),
-    FieldSchema(name="img_id", dtype=DataType.VARCHAR, max_length=100),
-    FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=512),
-    FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
-    FieldSchema(name="description", dtype=DataType.VARCHAR, max_length=4096),
-    FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=64),
-    FieldSchema(name="location", dtype=DataType.VARCHAR, max_length=128),
-    FieldSchema(name="environment", dtype=DataType.VARCHAR, max_length=64),
-]
+# ---------------------------------------------------------------- 3. Collection
+with stage.step(
+    "创建 Collection",
+    name=COLLECTION_NAME,
+    why="相比 C3-04 只存 image_path，这里存了完整的业务元数据",
+) as step:
+    if milvus_client.has_collection(COLLECTION_NAME):
+        milvus_client.drop_collection(COLLECTION_NAME)
+        step.detail(f"已删除同名旧 Collection: {COLLECTION_NAME}")
 
-schema = CollectionSchema(fields, description="多模态龙类图像检索")
+    # 维度从真实输出里取，避免硬编码
+    sample_text = dataset.get_text_content(dataset.images[0])
+    sample_path = dataset.images[0].path
+    dim = len(encoder.encode_multimodal(sample_path, sample_text))
 
-# 创建集合
-milvus_client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
-print(f"成功创建 Collection: '{COLLECTION_NAME}'")
+    fields = [
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=dim),
+        FieldSchema(name="img_id", dtype=DataType.VARCHAR, max_length=100),
+        FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=512),
+        FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
+        FieldSchema(name="description", dtype=DataType.VARCHAR, max_length=4096),
+        FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=64),
+        FieldSchema(name="location", dtype=DataType.VARCHAR, max_length=128),
+        FieldSchema(name="environment", dtype=DataType.VARCHAR, max_length=64),
+    ]
+    schema = CollectionSchema(fields, description="多模态龙类图像检索")
+    milvus_client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
+    step.detail(f"9 个字段：id / vector(dim={dim}) / img_id / image_path / title")
+    step.detail("           description / category / location / environment")
+    step.note(f"dim={dim}")
 
-# 4. 准备并插入数据
-print(f"\n--> 正在向 '{COLLECTION_NAME}' 插入数据")
-data_to_insert = []
-for img_data in tqdm(dataset.images, desc="生成多模态嵌入"):
-    # 结合图像和文本信息生成向量
-    text_content = dataset.get_text_content(img_data)
-    vector = encoder.encode_multimodal(img_data.path, text_content)
-    
-    data_to_insert.append({
-        "vector": vector,
-        "img_id": img_data.img_id,
-        "image_path": img_data.path,
-        "title": img_data.title,
-        "description": img_data.description,
-        "category": img_data.category,
-        "location": img_data.location,
-        "environment": img_data.environment
-    })
+# ---------------------------------------------------------------- 4. 编码入库
+with stage.step(
+    "批量编码并插入",
+    func="Encoder.encode_multimodal(img, text)",
+    count=len(dataset.images),
+    why="和 04 的纯图像编码不同：这里把元数据文字也一起编码进向量",
+) as step:
+    data_to_insert = []
+    for img_data in tqdm(dataset.images, desc="生成多模态嵌入"):
+        text_content = dataset.get_text_content(img_data)
+        vector = encoder.encode_multimodal(img_data.path, text_content)
+        data_to_insert.append({
+            "vector": vector,
+            "img_id": img_data.img_id,
+            "image_path": img_data.path,
+            "title": img_data.title,
+            "description": img_data.description,
+            "category": img_data.category,
+            "location": img_data.location,
+            "environment": img_data.environment,
+        })
 
-if data_to_insert:
     result = milvus_client.insert(collection_name=COLLECTION_NAME, data=data_to_insert)
-    print(f"成功插入 {result['insert_count']} 条数据。")
+    step.detail(f"insert_count = {result['insert_count']}")
+    step.note(f"{result['insert_count']} 条")
 
-# 5. 创建索引
-print(f"\n--> 正在为 '{COLLECTION_NAME}' 创建索引")
-index_params = milvus_client.prepare_index_params()
-index_params.add_index(
-    field_name="vector",
+# ---------------------------------------------------------------- 5. 索引
+with stage.step(
+    "建 HNSW 索引并加载",
     index_type="HNSW",
-    metric_type="COSINE",
-    params={"M": 16, "efConstruction": 256}
-)
-milvus_client.create_index(collection_name=COLLECTION_NAME, index_params=index_params)
-print("成功为向量字段创建 HNSW 索引。")
-milvus_client.load_collection(collection_name=COLLECTION_NAME)
-print("已加载 Collection 到内存中。")
+    metric="COSINE",
+    params="M=16, efConstruction=256",
+) as step:
+    index_params = milvus_client.prepare_index_params()
+    index_params.add_index(
+        field_name="vector",
+        index_type="HNSW",
+        metric_type="COSINE",
+        params={"M": 16, "efConstruction": 256},
+    )
+    milvus_client.create_index(collection_name=COLLECTION_NAME, index_params=index_params)
+    milvus_client.load_collection(collection_name=COLLECTION_NAME)
+    step.detail("HNSW 索引已建，Collection 已加载进内存")
+    step.note("索引就绪")
 
-# 6. 执行多模态检索
-print(f"\n--> 正在 '{COLLECTION_NAME}' 中执行多模态检索")
+# ---------------------------------------------------------------- 6. 图+文
+with stage.step(
+    "查询①：图像 + 文本",
+    image="query.png",
+    text="悬崖上的巨龙",
+    why="图给视觉线索，文给语义方向，两者融合后最准",
+) as step:
+    query_image_path = os.path.join(DATA_DIR, "query.png")
+    query_text = "悬崖上的巨龙"
+    query_vector = encoder.encode_query(image_path=query_image_path, text=query_text)
 
-# 示例1：图像+文本查询
-query_image_path = os.path.join(DATA_DIR, "query.png")
-query_text = "悬崖上的巨龙"
-query_vector = encoder.encode_query(image_path=query_image_path, text=query_text)
+    search_results = milvus_client.search(
+        collection_name=COLLECTION_NAME,
+        data=[query_vector],
+        output_fields=OUTPUT_FIELDS,
+        limit=6,
+        search_params={"metric_type": "COSINE", "params": {"ef": 128}},
+    )[0]
 
-print(f"\n=== 多模态查询（图像+文本）===")
-print(f"查询图像: {query_image_path}")
-print(f"查询文本: {query_text}")
+    retrieved_results = []
+    for i, hit in enumerate(search_results, 1):
+        step.detail(
+            f"Top {i}: {hit['distance']:.4f}  {hit['entity']['title']}"
+            f"（{hit['entity']['category']}）"
+        )
+        retrieved_results.append({
+            "image_path": hit["entity"]["image_path"],
+            "distance": hit["distance"],
+        })
+    step.note(f"Top{len(retrieved_results)}")
 
-search_results = milvus_client.search(
-    collection_name=COLLECTION_NAME,
-    data=[query_vector],
-    output_fields=["img_id", "image_path", "title", "description", "category", "location", "environment"],
-    limit=6,
-    search_params={"metric_type": "COSINE", "params": {"ef": 128}}
-)[0]
+# ---------------------------------------------------------------- 7. 纯文 / 纯图
+with stage.step(
+    "查询②③：纯文本 vs 纯图像",
+    text_query="悬崖上的巨龙",
+    image_query="query.png",
+    why="同一意图换一种输入方式，看排序怎么变",
+) as step:
+    text_query = "悬崖上的巨龙"
+    text_query_vector = encoder.encode_query(text=text_query)
+    text_results = milvus_client.search(
+        collection_name=COLLECTION_NAME,
+        data=[text_query_vector],
+        output_fields=OUTPUT_FIELDS,
+        limit=3,
+        search_params={"metric_type": "COSINE", "params": {"ef": 128}},
+    )[0]
+    step.detail("--- 纯文本查询 ---")
+    for i, hit in enumerate(text_results, 1):
+        step.detail(f"  Top {i}: {hit['distance']:.4f}  {hit['entity']['title']}")
 
-retrieved_results = []
-print("检索结果:")
-for i, hit in enumerate(search_results):
-    print(f"  Top {i+1}: ID={hit['id']}, 距离={hit['distance']:.4f}")
-    print(f"    标题: {hit['entity']['title']}")
-    print(f"    描述: {hit['entity']['description'][:100]}...")
-    print(f"    类别: {hit['entity']['category']}")
-    print(f"    路径: {hit['entity']['image_path']}")
-    print("-" * 50)
-    retrieved_results.append({
-        'image_path': hit['entity']['image_path'],
-        'distance': hit['distance']
-    })
+    step.detail("")
+    image_query_path = os.path.join(DATA_DIR, "query.png")
+    image_query_vector = encoder.encode_query(image_path=image_query_path)
+    image_results = milvus_client.search(
+        collection_name=COLLECTION_NAME,
+        data=[image_query_vector],
+        output_fields=OUTPUT_FIELDS,
+        limit=3,
+        search_params={"metric_type": "COSINE", "params": {"ef": 128}},
+    )[0]
+    step.detail("--- 纯图像查询 ---")
+    for i, hit in enumerate(image_results, 1):
+        step.detail(f"  Top {i}: {hit['distance']:.4f}  {hit['entity']['title']}")
 
-# 示例2：纯文本查询
-print(f"\n=== 纯文本查询 ===")
-text_query = "悬崖上的巨龙"
-text_query_vector = encoder.encode_query(text=text_query)
+    step.detail("")
+    step.detail("三种查询的 Top1 是否一致？一致说明图文编码空间已经对齐")
+    step.note("3 组结果")
 
-print(f"查询文本: {text_query}")
+# ---------------------------------------------------------------- 8. 可视化
+with stage.step(
+    "可视化并清理",
+    output="data/C4/multimodal_search.png",
+) as step:
+    if retrieved_results:
+        panoramic_image = visualize_results(query_image_path, retrieved_results)
+        combined_image_path = "../../data/C4/multimodal_search.png"
+        cv2.imwrite(combined_image_path, panoramic_image)
+        step.detail(f"结果图已保存：{combined_image_path}")
 
-text_search_results = milvus_client.search(
-    collection_name=COLLECTION_NAME,
-    data=[text_query_vector],
-    output_fields=["img_id", "image_path", "title", "description", "category", "location", "environment"],
-    limit=3,
-    search_params={"metric_type": "COSINE", "params": {"ef": 128}}
-)[0]
+    milvus_client.release_collection(collection_name=COLLECTION_NAME)
+    milvus_client.drop_collection(COLLECTION_NAME)
+    step.detail(f"已释放并删除 Collection: {COLLECTION_NAME}")
+    step.note("已清理")
 
-print("文本检索结果:")
-for i, hit in enumerate(text_search_results):
-    print(f"  Top {i+1}: {hit['entity']['title']} (距离: {hit['distance']:.4f})")
-    print(f"    描述: {hit['entity']['description'][:80]}...")
+stage.summary()
 
-# 示例3：纯图像查询
-print(f"\n=== 纯图像查询 ===")
-image_query_path = os.path.join(DATA_DIR, "query.png")
-image_query_vector = encoder.encode_query(image_path=image_query_path)
-
-print(f"查询图像: {image_query_path}")
-
-image_search_results = milvus_client.search(
-    collection_name=COLLECTION_NAME,
-    data=[image_query_vector],
-    output_fields=["img_id", "image_path", "title", "description", "category", "location", "environment"],
-    limit=3,
-    search_params={"metric_type": "COSINE", "params": {"ef": 128}}
-)[0]
-
-print("图像检索结果:")
-for i, hit in enumerate(image_search_results):
-    print(f"  Top {i+1}: {hit['entity']['title']} (距离: {hit['distance']:.4f})")
-    print(f"    类别: {hit['entity']['category']}")
-    print(f"    描述: {hit['entity']['description'][:80]}...")
-    print(f"    路径: {hit['entity']['image_path']}")
-    print("-" * 30)
-
-# 7. 可视化与清理
-print(f"\n--> 正在可视化结果并清理资源")
-if retrieved_results:
-    panoramic_image = visualize_results(query_image_path, retrieved_results)
-    combined_image_path = "../../data/C4/multimodal_search.png"
-    cv2.imwrite(combined_image_path, panoramic_image)
-    print(f"结果图像已保存到: {combined_image_path}")
-    # Image.open(combined_image_path).show()
-
-# 8. 清理资源
-milvus_client.release_collection(collection_name=COLLECTION_NAME)
-print(f"已从内存中释放 Collection: '{COLLECTION_NAME}'")
-milvus_client.drop_collection(COLLECTION_NAME)
-print(f"已删除 Collection: '{COLLECTION_NAME}'") 
+print()
+print("=" * 72)
+print("  观察点")
+print("=" * 72)
+print("1. 图+文查询通常最准：视觉和语义两个信号投票")
+print("2. 纯文本查询依赖向量里「学到的图文对应关系」，描述越具体越准")
+print("3. 纯图像查询最容易受背景干扰（比如都拍到了天空/悬崖）")
+print("4. 生产建议：默认走图+文；只有用户没输入文字时才退回纯图像")
+print()
+print("提示：本脚本会删掉演示用 Collection，重复跑不会累积脏数据")
+print("=" * 72)

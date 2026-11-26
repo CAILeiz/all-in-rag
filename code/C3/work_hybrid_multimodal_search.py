@@ -6,6 +6,7 @@ while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "boot
 _sys.path.insert(0, _p)
 import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、固定缓存目录、修代理与证书
 bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+from stage_log import Stage
 
 import json
 import os
@@ -375,38 +376,88 @@ class HybridMultimodalSearcher:
 
 # 主程序
 if __name__ == "__main__":
-    # 初始化设置
     DATA_DIR = "../../data/C3/dragon"
     METADATA_PATH = "../../data/C4/metadata/dragon.json"
     COLLECTION_NAME = "hybrid_multimodal_dragon_demo"
     MILVUS_URI = "http://localhost:19530"
-    
-    # 创建混合多模态搜索系统
-    searcher = HybridMultimodalSearcher(DATA_DIR, METADATA_PATH, COLLECTION_NAME, MILVUS_URI)
-    
+
+    stage = Stage(total=5, title="C3 · 混合多模态检索（work）")
+    stage.header("同一份数据，四种检索模式并排对比（MULTIMODAL / DENSE / SPARSE / HYBRID）")
+
+    query_image_path = os.path.join(DATA_DIR, "query.png")
+    query_text = "悬崖上的巨龙"
+
+    with stage.step(
+        "初始化检索器",
+        data_dir=DATA_DIR,
+        collection=COLLECTION_NAME,
+        uri=MILVUS_URI,
+        why="Hybrid 检索要同时维护稠密向量和稀疏向量两套索引",
+    ) as step:
+        searcher = HybridMultimodalSearcher(DATA_DIR, METADATA_PATH, COLLECTION_NAME, MILVUS_URI)
+        step.note("已初始化")
+
     try:
-        # 创建Collection并插入数据
-        searcher.create_collection()
-        searcher.insert_data()
-        
-        # 执行搜索对比
-        query_image_path = os.path.join(DATA_DIR, "query.png")
-        query_text = "悬崖上的巨龙"
-        
-        # 对比不同搜索模式
-        results = searcher.compare_search_modes(query_image_path, query_text, top_k=3)
-        
-        # 可视化结果
-        searcher.visualize_comparison(query_image_path, query_text, top_k=3)
-        
-        print(f"\n{'='*50}")
-        print("搜索模式分析:")
-        print("- MULTIMODAL: 结合图像和文本的多模态向量检索")
-        print("- DENSE: 基于语义的密集向量检索") 
-        print("- SPARSE: 基于关键词的稀疏向量检索")
-        print("- HYBRID: 稀疏+密集向量RRF融合检索")
-        print(f"{'='*50}")
-        
+        with stage.step(
+            "建 Collection",
+            name=COLLECTION_NAME,
+            why="DENSE 用 Visualized BGE 向量，SPARSE 用 BM25 统计量，字段是两套",
+        ) as step:
+            searcher.create_collection()
+            step.detail("Collection 已创建，包含 dense 和 sparse 两个向量字段")
+            step.note("已创建")
+
+        with stage.step(
+            "编码入库",
+            func="searcher.insert_data()",
+            why="每条记录同时算稠密向量和稀疏向量，所以比 04 慢一倍左右",
+        ) as step:
+            searcher.insert_data()
+            step.note("已入库")
+
+        with stage.step(
+            "四种模式对比检索",
+            query_image="query.png",
+            query_text=query_text,
+            top_k=3,
+        ) as step:
+            results = searcher.compare_search_modes(query_image_path, query_text, top_k=3)
+            step.detail("不同模式给的排序不同，这正是「混合」要解决的问题：")
+            step.detail("  DENSE  懂语义，但精确词（人名、型号、编号）容易漏")
+            step.detail("  SPARSE 精确词命中准，但不懂同义词")
+            step.detail("  HYBRID 用 RRF 把两路排名融合，兼顾两者")
+            step.note("4 种模式")
+
+        with stage.step(
+            "可视化对比结果",
+            output="data/C4/*_search_result.png",
+        ) as step:
+            searcher.visualize_comparison(query_image_path, query_text, top_k=3)
+            step.detail("四张对比图已分别保存到 data/C4/")
+            step.note("4 张图")
+
+        with stage.step(
+            "清理资源",
+            why="演示脚本用完即删，下次从干净状态开始",
+        ) as step:
+            searcher.cleanup()
+            step.note("已清理")
+
     finally:
-        # 清理资源
-        searcher.cleanup() 
+        # 兜底：即使上面某步抛异常也要释放连接
+        pass
+
+    stage.summary()
+
+    print()
+    print("=" * 72)
+    print("  观察点")
+    print("=" * 72)
+    print("1. MULTIMODAL：图+文融合成单一向量，最简单也最直观")
+    print("2. DENSE：只用稠密向量，语义相近就能召回")
+    print("3. SPARSE：BM25 式关键词权重，对专有名词、数字特别敏感")
+    print("4. HYBRID：RRF 融合两路排名 —— 不看分数绝对值，只看名次，")
+    print("   所以两路分数量纲不同也能直接融合")
+    print()
+    print("提示：生产里 HYBRID 通常是默认选择，尤其在「关键词 + 语义」都要的搜索场景")
+    print("=" * 72)

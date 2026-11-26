@@ -38,18 +38,27 @@ from unstructured.partition.auto import partition
 # PDF文件路径
 PDF_PATH = "../../data/C2/pdf/rag.pdf"
 
+# 显式声明语言：不传时 unstructured 默认当英文（日志会打 "No languages specified"），
+# 中文文档的句子切分/词性标注都会受影响。chi_sim=简体中文，eng=英文（URL、括号内容）。
+LANGUAGES = ["chi_sim", "eng"]
+
 stage = Stage(total=3, title="C2 · 数据加载")
 stage.header("Unstructured.partition：PDF → 带类型的元素列表")
 
 # ---------------------------------------------------------------- 1. 解析
 with stage.step(
     "解析 PDF",
-    api="partition(filename, content_type='application/pdf')",
+    api="partition(filename, content_type='application/pdf', languages=[...])",
     file=PDF_PATH,
-    note="这一句内部会调 poppler 渲染页面、pdfminer 抽文字、tesseract 处理图片区域",
+    note="poppler 渲染页面、pdfminer 抽文字层；有文字层就不会调用 tesseract",
 ) as step:
     # 使用Unstructured加载并解析PDF文档
-    elements = partition(filename=PDF_PATH, content_type="application/pdf")
+    # languages 不传 → 默认英文，中文 PDF 的切句会不准，所以显式指定
+    elements = partition(
+        filename=PDF_PATH,
+        content_type="application/pdf",
+        languages=LANGUAGES,
+    )
     step.detail(
         f"解析完成：{len(elements)} 个元素，"
         f"共 {sum(len(str(e)) for e in elements)} 字符"
@@ -111,4 +120,20 @@ print("    把 Title 当章节标记），清洗逻辑就是 C2 第二节之后�
 print()
 print("提示：如果报 'Is poppler installed'，执行 brew install poppler")
 print("=" * 72)
-print(f"初始 elements：{elements}")
+
+# ---- 诊断：查看一个元素的全部 key/value ----
+import json
+
+
+def dump_one(el, label=""):
+    print(f"--- {label}{el.category} ---")
+    print(json.dumps(el.to_dict(), ensure_ascii=False, indent=2))
+
+
+dump_one(elements[0], "样例 · ")
+dump_one(elements[17], "样例 · ")
+dump_one(elements[86], "样例 · ")
+dump_one(elements[96], "样例 · ")
+print("\n字段覆盖情况：")
+for ks, n in Counter(tuple(sorted(vars(e.metadata))) for e in elements).most_common():
+    print(f"  {n:4d} 个 · {ks}")

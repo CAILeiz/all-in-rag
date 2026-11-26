@@ -7,6 +7,7 @@ _sys.path.insert(0, _p)
 import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、修代理与证书
 bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
 from llm_config import llm_kwargs
+from stage_log import Stage
 
 import os
 from langchain_core.prompts import ChatPromptTemplate
@@ -15,6 +16,9 @@ from langchain_deepseek import ChatDeepSeek
 from langchain_core.runnables import RunnableBranch
 
 llm = ChatDeepSeek(temperature=0, **llm_kwargs())
+
+stage = Stage(total=2, title="C4 · LLM 路由（按菜系分流）")
+stage.header("分类器先判断菜系，再交给对应大厨链回答")
 
 # 1. 设置不同菜系的处理链
 sichuan_prompt = ChatPromptTemplate.from_template(
@@ -51,7 +55,17 @@ router_branch = RunnableBranch(
 
 # 组合成完整路由链
 full_router_chain = {"topic": classifier_chain, "question": lambda x: x["question"]} | router_branch
-print("完整的路由链创建成功。\n")
+print()
+with stage.step(
+    "构建路由链",
+    classifier="LLM 分类为 ['川菜','粤菜','其他']",
+    branches="川菜链 / 粤菜链 / 通用链（兜底）",
+    why="RunnableBranch 按顺序匹配，第一个为 True 的分支胜出，最后一个是 default",
+) as step:
+    step.detail("川菜链  ：prompt 加「川菜大厨」人设")
+    step.detail("粤菜链  ：prompt 加「粤菜大厨」人设")
+    step.detail("通用链  ：不限定菜系，兜底")
+    step.note("3 条分支")
 
 
 # 3. 运行演示查询
@@ -61,18 +75,38 @@ demo_questions = [
     {"question": "番茄炒蛋需要放糖吗？"}      # 应该路由到其他
 ]
 
-for i, item in enumerate(demo_questions, 1):
-    question = item["question"]
-    print(f"\n--- 问题 {i}: {question} ---")
-    
-    try:
-        # 获取路由决策
-        topic = classifier_chain.invoke({"question": question})
-        print(f"路由决策: {topic}")
+with stage.step(
+    "演示查询",
+    count=len(demo_questions),
+    why="注意看每个问题的路由决策是否和预期一致（麻婆豆腐→川菜、白切鸡→粤菜）",
+) as step:
+    for i, item in enumerate(demo_questions, 1):
+        question = item["question"]
+        step.detail("")
+        step.detail(f"--- 问题 {i}: {question} ---")
+        try:
+            topic = classifier_chain.invoke({"question": question})
+            step.detail(f"路由决策：{topic}")
 
-        # 执行完整链
-        result = full_router_chain.invoke(item)
-        print(f"回答: {result}")
-    except Exception as e:
-        print(f"执行错误: {e}")
+            result = full_router_chain.invoke(item)
+            preview = str(result).strip().splitlines()
+            for line in preview[:3]:
+                step.detail(f"  回答：{line}")
+        except Exception as e:
+            step.detail(f"执行错误：{e}")
+    step.note(f"{len(demo_questions)} 个问题")
+
+stage.summary()
+
+print()
+print("=" * 72)
+print("  观察点")
+print("=" * 72)
+print("1. 路由靠的是 LLM 分类，不是关键词匹配 —— 所以口径不统一时会误判")
+print("2. 分类失败（返回不在列表里的词）会落到通用链，不会报错")
+print("3. 这条链路是「一次分类 + 一次回答」= 2 次 LLM 调用，成本翻倍")
+print("4. 生产里常把分类结果缓存，或改用小模型/规则先粗筛")
+print()
+print("提示：分类器温度设 0，是为了让同一个问题每次分级稳定")
+print("=" * 72)
 

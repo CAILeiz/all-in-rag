@@ -1,3 +1,18 @@
+"""C4-w · 重排 + 精炼（work 版：中文友好分块）
+
+对应文档：docs/chapter4/07_rerank_and_refine.md（C4-07 的练习版本）
+
+和 07 的差别只有**分块策略**：
+
+    07     chunk_size=500 / overlap=100，默认英文分隔符
+    work   chunk_size=300 / overlap=20，中文标点优先（。！？；，）
+
+跑完对比一下两边「粗排 vs 精炼后」的条数，就能看出分块粒度的影响。
+
+运行：
+    python3 code/C4/work_rerank_and_refine.py
+    RAG_LOG=quiet python3 code/C4/work_rerank_and_refine.py
+"""
 import os as _os, sys as _sys
 # 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
 _p = _os.path.dirname(_os.path.abspath(__file__))
@@ -6,6 +21,7 @@ while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "boot
 _sys.path.insert(0, _p)
 import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、固定缓存目录、修代理与证书
 bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+from stage_log import Stage
 
 import os
 from langchain_community.vectorstores import FAISS
@@ -149,30 +165,41 @@ llm = ChatDeepSeek(
     api_key=os.getenv("DEEPSEEK_API_KEY")
 )
 
+
 # 1. 加载和处理文档
-loader = TextLoader("../../data/C4/txt/ai.txt", encoding="utf-8")
-documents = loader.load()
+stage = Stage(total=5, title="C4 · 重排 + 精炼（work · 中文分块）")
+stage.header("分块用中文标点优先，chunk 更小，看粗排/精炼的差异")
 
-# 优化分块策略：减少重叠，使用中文友好的分隔符
-text_splitter = RecursiveCharacterTextSplitter(
-    separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""],
-    chunk_size=300,
-    chunk_overlap=20
-)
+QUERY = "AI还有哪些缺陷需要克服？"
+TOPK = 20
 
-docs = text_splitter.split_documents(documents)
+with stage.step(
+    "加载并切分文档",
+    path="../../data/C4/txt/ai.txt",
+    chunk="300 / overlap 20（中文标点优先）",
+    why="比 07 切得更碎：片段短，LLM 压缩更快，但上下文也更容易被截断",
+) as step:
+    loader = TextLoader("../../data/C4/txt/ai.txt", encoding="utf-8")
+    documents = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""],
+        chunk_size=300,
+        chunk_overlap=20,
+    )
+    docs = text_splitter.split_documents(documents)
+    step.detail(f"原始 {len(documents)} 篇 → 切出 {len(docs)} 个 chunk")
+    step.note(f"{len(docs)} chunks")
 
-# 2. 创建向量存储和基础检索器
-vectorstore = FAISS.from_documents(docs, hf_bge_embeddings)
-base_retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
+with stage.step(
+    "建 FAISS 向量库 + 基础检索器",
+    embed="BAAI/bge-small-zh-v1.5",
+    k=TOPK,
+) as step:
+    vectorstore = FAISS.from_documents(docs, hf_bge_embeddings)
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": TOPK})
+    step.note(f"k={TOPK}")
 
-# 3. 设置ColBERT重排序器
-reranker = ColBERTReranker()
-
-# 4. 设置LLM压缩器
-# 注意：LLMChainExtractor 自带的提示词是英文的（"...extract any part of the context AS IS..."），
-# 中文场景下小模型（如本地 3B）经常直接返回空串，导致压缩后一条不剩。
-# 这里换成中文提示词，并要求「无相关内容」时输出固定词，便于过滤。
+# 3/4. 设置 ColBERT 重排器 + LLM 压缩器
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -187,45 +214,64 @@ _EXTRACT_PROMPT = PromptTemplate.from_template(
 摘抄结果："""
 )
 
-class ChineseExtractCompressor(LLMChainExtractor):
-    """在 LLMChainExtractor 基础上过滤掉「无」这类占位输出。
 
-    基类只判断 len(output) == 0，而中文提示词让模型输出「无」时长度不为 0，
-    于是「无相关」的文档也会被当成结果返回。
-    """
+class ChineseExtractCompressor(LLMChainExtractor):
+    """在 LLMChainExtractor 基础上过滤掉「无」这类占位输出。"""
 
     def compress_documents(self, documents, query, callbacks=None):
         out = super().compress_documents(documents, query, callbacks=callbacks)
         return [d for d in out if d.page_content.strip() not in ("无", "无。", "NONE", "NO_OUTPUT")]
 
 
-compressor = ChineseExtractCompressor.from_llm(llm, prompt=_EXTRACT_PROMPT)
+with stage.step(
+    "组装重排 + 压缩管道",
+    reranker="ColBERT",
+    compressor="LLMChainExtractor（中文提示词）",
+) as step:
+    reranker = ColBERTReranker()
+    compressor = ChineseExtractCompressor.from_llm(llm, prompt=_EXTRACT_PROMPT)
+    pipeline_compressor = DocumentCompressorPipeline(
+        transformers=[reranker, compressor]
+    )
+    final_retriever = ContextualCompressionRetriever(
+        base_compressor=pipeline_compressor,
+        base_retriever=base_retriever,
+    )
+    step.note("管道就绪")
 
-# 5. 使用DocumentCompressorPipeline组装压缩管道
-# 流程: ColBERT重排 -> LLM压缩
-pipeline_compressor = DocumentCompressorPipeline(
-    transformers=[reranker, compressor]
-)
+with stage.step(
+    "基础检索（粗排）",
+    query=QUERY,
+    why="chunk 更碎意味着粗排更容易命中关键词，但也更容易命中「碎片化的噪音」",
+) as step:
+    base_results = base_retriever.get_relevant_documents(QUERY)
+    for i, doc in enumerate(base_results, 1):
+        step.detail(f"  [{i}] {doc.page_content[:70]}...")
+    step.note(f"Top{len(base_results)}")
 
-# 6. 创建最终的压缩检索器
-final_retriever = ContextualCompressionRetriever(
-    base_compressor=pipeline_compressor,
-    base_retriever=base_retriever
-)
+with stage.step(
+    "重排 + 精炼",
+    why="和 07 对比这一行：chunk 越小，精炼后剩下的条数通常越多但每条更短",
+) as step:
+    final_results = final_retriever.get_relevant_documents(QUERY)
+    for i, doc in enumerate(final_results, 1):
+        step.detail(f"  [{i}] {' '.join(doc.page_content.split())[:90]}")
+    step.detail("")
+    step.detail(f"压缩比：{len(base_results)} → {len(final_results)} 条")
+    total_chars = sum(len(d.page_content) for d in final_results)
+    step.detail(f"精炼后总字符数：{total_chars}")
+    step.note(f"{len(base_results)} → {len(final_results)}")
 
-# 7. 执行查询并展示结果
-query = "AI还有哪些缺陷需要克服？"
-print(f"\n{'='*20} 开始执行查询 {'='*20}")
-print(f"查询: {query}\n")
+stage.summary()
 
-# 7.1 基础检索结果
-print(f"--- (1) 基础检索结果 (Top 20) ---")
-base_results = base_retriever.get_relevant_documents(query)
-for i, doc in enumerate(base_results):
-    print(f"  [{i+1}] {doc.page_content[:100]}...\n")
-
-# 7.2 使用管道压缩器的最终结果
-print(f"\n--- (2) 管道压缩后结果 (ColBERT重排 + LLM压缩) ---")
-final_results = final_retriever.get_relevant_documents(query)
-for i, doc in enumerate(final_results):
-    print(f"  [{i+1}] {doc.page_content}\n")
+print()
+print("=" * 72)
+print("  观察点（对比 07）")
+print("=" * 72)
+print("1. 07 切 500 字，work 切 300 字：这里是 C4 唯一的变量")
+print("2. 中文标点优先（。！？；，）能让一个 chunk 尽量停在句末，语义更完整")
+print("3. chunk 小 → 召回多、噪音也多；chunk 大 → 上下文全、token 贵")
+print("4. 判断分块好坏没有标准答案，要看下游是「精确问答」还是「摘要归纳」")
+print()
+print("提示：overlap 从 100 降到 20，是为了减少相邻 chunk 的重复内容")
+print("=" * 72)

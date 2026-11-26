@@ -16,14 +16,19 @@ CharacterTextSplitter 只在分隔符（默认 "\n\n"）处切，遇到一整段
     [2/3] 固定大小分块
     [3/3] 打印切分结果
 """
+
 import os as _os, sys as _sys
+
 # 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
 _p = _os.path.dirname(_os.path.abspath(__file__))
-while _p != _os.path.dirname(_p) and not _os.path.exists(_os.path.join(_p, "bootstrap.py")):
+while _p != _os.path.dirname(_p) and not _os.path.exists(
+    _os.path.join(_p, "bootstrap.py")
+):
     _p = _os.path.dirname(_p)
 _sys.path.insert(0, _p)
 import bootstrap  # noqa: F401  仅为了副作用：加载 code/.env、固定缓存目录、修代理与证书
-bootstrap.anchor_cwd(__file__)   # 工作目录钉在脚本所在目录，相对路径才不会失效
+
+bootstrap.anchor_cwd(__file__)  # 工作目录钉在脚本所在目录，相对路径才不会失效
 from stage_log import Stage
 
 from langchain_text_splitters import CharacterTextSplitter
@@ -53,8 +58,8 @@ with stage.step(
 ) as step:
     # 2. 初始化固定大小分块器
     text_splitter = CharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,      # 每个块的大小（目标值，不是硬上限）
-        chunk_overlap=CHUNK_OVERLAP # 块之间的重叠大小
+        chunk_size=CHUNK_SIZE,  # 每个块的大小（目标值，不是硬上限）
+        chunk_overlap=CHUNK_OVERLAP,  # 块之间的重叠大小
     )
 
     # 3. 执行分块
@@ -62,10 +67,16 @@ with stage.step(
 
     lens = [len(c.page_content) for c in chunks]
     over = [n for n in lens if n > CHUNK_SIZE]
-    step.detail(f"块数：{len(chunks)}，长度 {min(lens)}~{max(lens)}，平均 {sum(lens)//len(lens)}")
+    step.detail(
+        f"块数：{len(chunks)}，长度 {min(lens)}~{max(lens)}，平均 {sum(lens)//len(lens)}"
+    )
     if over:
-        step.detail(f"⚠ {len(over)} 块超过 chunk_size={CHUNK_SIZE}（见上方 LangChain 警告）")
-        step.detail("  原因：它只在 '\\n\\n' 处切；单个段落本身就 >200 时无法再劈，只能原样保留")
+        step.detail(
+            f"⚠ {len(over)} 块超过 chunk_size={CHUNK_SIZE}（见上方 LangChain 警告）"
+        )
+        step.detail(
+            "  原因：它只在 '\\n\\n' 处切；单个段落本身就 >200 时无法再劈，只能原样保留"
+        )
     step.note(f"{len(chunks)} 块，{len(over)} 块超限")
 
 # ---------------------------------------------------------------- 3. 打印

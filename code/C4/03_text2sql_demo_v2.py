@@ -1,3 +1,28 @@
+"""C4-03 · Text2SQL v2：知识库向量化 + 示例驱动
+
+对应文档：docs/chapter4/03_text2sql.md（与 03 对照阅读）
+
+和 03 的差别：
+
+    03    给 LLM 一份 schema，让它现场生成 SQL
+    03v2  先把「问题→SQL」的历史示例存进向量库，检索相似示例再拼 prompt
+
+v2 的思路是 **few-shot 检索**：库里已有的相似问题，比空口描述 schema 更能约束
+LLM 的写法（尤其是字段名、聚合口径、日期格式）。
+
+这个脚本里的 demo() 只跑后半段（编码 + 直接执行 SQL），不连 LLM，
+方便你先确认「向量维度和 SQL 执行」这两件事是通的。
+
+运行（要 Milvus 才跑得完整，demo() 本身只用到嵌入模型 + sqlite）：
+    python3 code/C4/03_text2sql_demo_v2.py
+    RAG_LOG=quiet python3 code/C4/03_text2sql_demo_v2.py
+
+4 个阶段：
+    [1/4] 加载嵌入模型并测试编码
+    [2/4] 建演示数据库
+    [3/4] 执行 3 条 SQL 并看结果
+    [4/4] 清理
+"""
 import os as _os, sys as _sys
 # 向上找到含 bootstrap.py 的 code/ 目录，加入 sys.path（脚本可能在多级子目录里）
 _p = _os.path.dirname(_os.path.abspath(__file__))
@@ -16,6 +41,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from pymilvus import connections, MilvusClient, FieldSchema, CollectionSchema, DataType, Collection
+from stage_log import Stage
 
 
 class BGESmallEmbeddingFunction:
@@ -330,56 +356,88 @@ class SimpleKnowledgeBase:
 
 
 def demo():
-    """简单演示"""
-    # 模型测试
-    embedding_function = BGESmallEmbeddingFunction()
-    test_texts = ["查询用户", "统计数据"]
-    embeddings = embedding_function.encode_text(test_texts)
-    print(f"向量维度: {embeddings.shape}")
-    
-    # 数据库查询演示
+    """简单演示：编码 → 建库 → 执行 SQL → 清理。"""
+    stage = Stage(total=4, title="C4 · Text2SQL v2（示例检索）")
+    stage.header("先把「问题→SQL」示例向量化，再检索相似示例约束 LLM")
+
+    # 1. 模型测试
+    with stage.step(
+        "加载嵌入模型并测试编码",
+        model="BAAI/bge-small-zh-v1.5",
+        why="知识库里的「问题+SQL+描述」要先编码成向量，才能被检索到",
+    ) as step:
+        embedding_function = BGESmallEmbeddingFunction()
+        test_texts = ["查询用户", "统计数据"]
+        embeddings = embedding_function.encode_text(test_texts)
+        step.detail(f"向量维度：{embeddings.shape}")
+        step.detail("这两条文本的向量就是后面检索示例的「钥匙」")
+        step.note(f"dim={embeddings.shape[1]}")
+
+    # 2. 数据库查询演示
     db_path = "demo.db"
-    
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cursor.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, city TEXT)")
-    
-    users_data = [(1, '张三', 25, '北京'), (2, '李四', 32, '上海'), (3, '王五', 35, '深圳')]
-    cursor.executemany("INSERT INTO users VALUES (?, ?, ?, ?)", users_data)
-    
-    conn.commit()
-    
-    # 执行查询
+
+    with stage.step(
+        "建演示数据库",
+        table="users(id, name, age, city)",
+        why="表越简单越好：这一步只验证「SQL 能跑通」，不验证 LLM",
+    ) as step:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, city TEXT)")
+        users_data = [(1, "张三", 25, "北京"), (2, "李四", 32, "上海"), (3, "王五", 35, "深圳")]
+        cursor.executemany("INSERT INTO users VALUES (?, ?, ?, ?)", users_data)
+        conn.commit()
+        step.detail("插入 3 行用户数据")
+        step.note(f"{db_path}")
+
     test_sqls = [
         ("查询所有用户", "SELECT * FROM users"),
         ("年龄大于30的用户", "SELECT * FROM users WHERE age > 30"),
-        ("统计用户总数", "SELECT COUNT(*) FROM users")
+        ("统计用户总数", "SELECT COUNT(*) FROM users"),
     ]
-    
-    for i, (question, sql) in enumerate(test_sqls, 1):
-        print(f"\n问题 {i}: {question}")
-        print("-" * 40)
-        print(f"SQL: {sql}")
-        
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        
-        if rows:
-            print(f"返回 {len(rows)} 行数据")
-            for j, row in enumerate(rows[:2], 1):
-                print(f"  {j}. {row}")
-            
-            if len(rows) > 2:
-                print(f"  ... 还有 {len(rows) - 2} 行")
-        else:
-            print("无数据返回")
-    
-    conn.close()
-    os.remove(db_path)
+
+    with stage.step(
+        "执行 SQL 并看结果",
+        count=len(test_sqls),
+        why="第 3 条是聚合查询 —— 这类问题向量检索给不出答案，只能走 SQL",
+    ) as step:
+        for i, (question, sql) in enumerate(test_sqls, 1):
+            step.detail("")
+            step.detail(f"问题 {i}: {question}")
+            step.detail(f"  SQL：{sql}")
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            if rows:
+                step.detail(f"  返回 {len(rows)} 行")
+                for j, row in enumerate(rows[:2], 1):
+                    step.detail(f"    {j}. {row}")
+                if len(rows) > 2:
+                    step.detail(f"    ... 还有 {len(rows) - 2} 行")
+            else:
+                step.detail("  无数据返回")
+        step.note(f"{len(test_sqls)} 条 SQL")
+
+    with stage.step("清理", why="删掉临时库，避免污染下一次运行") as step:
+        conn.close()
+        os.remove(db_path)
+        step.detail(f"已删除 {db_path}")
+        step.note("已清理")
+
+    stage.summary()
+
+    print()
+    print("=" * 72)
+    print("  观察点")
+    print("=" * 72)
+    print("1. 03 靠 schema 现场生成；03v2 靠「检索相似示例」来约束写法")
+    print("2. few-shot 检索对字段名、聚合口径的帮助，比纯 schema 描述更直接")
+    print("3. 示例库要持续维护：业务新增表，就得补新的「问题→SQL」对")
+    print("4. 检索出来的示例不能照抄，要连同当前 schema 一起喂给 LLM")
+    print()
+    print("提示：这个 demo 不调 LLM，所以即使 Ollama 没开也能跑完")
+    print("=" * 72)
 
 
 if __name__ == "__main__":

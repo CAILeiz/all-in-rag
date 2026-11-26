@@ -72,9 +72,88 @@ def ensure_ssl_cert() -> None:
         os.environ.setdefault("CURL_CA_BUNDLE", cafile)
 
 
+def ensure_data_dirs() -> None:
+    """把 HF / NLTK 等缓存固定到仓库内 .cache/，并确保库真的会去那里找。
+
+    这一步是「脚本能独立跑」的关键：
+    - env 变量只影响**之后**才 import 的库，所以要在重依赖之前执行；
+    - 光设 NLTK_DATA 环境变量还不够 —— 已经 import 过 nltk 时它的 data.path 是快照，
+      必须再往 nltk.data.path 里显式插一条，否则找不到已下载的 punkt_tab。
+    """
+    cache_dir = CODE_DIR.parent / ".cache"
+    for sub, var in (
+        ("hf", "HF_HOME"),
+        ("nltk", "NLTK_DATA"),
+        ("llama_index", "LLAMA_INDEX_CACHE_DIR"),
+        ("chroma", "CHROMA_CACHE_DIR"),
+        ("matplotlib", "MPLCONFIGDIR"),
+    ):
+        path = cache_dir / sub
+        # 已由 local_env.sh / .env 指定的路径优先，这里只做兜底
+        os.environ.setdefault(var, str(path))
+
+    nltk_dir = os.environ["NLTK_DATA"]
+    try:
+        import nltk.data
+    except ImportError:
+        return  # 没装 nltk，等真正用到时再说
+    if nltk_dir not in nltk.data.path:
+        nltk.data.path.insert(0, nltk_dir)
+
+
+# unstructured 解析 PDF 时必需、且会静默吞掉异常的 NLTK 资源。
+# 缺任意一个的后果不是清晰的 LookupError，而是「文字层判定失败 → 回退 OCR →
+# 报 TesseractNotFoundError」，极具误导性，所以这里主动补齐。
+_NLTK_REQUIRED = (
+    ("punkt_tab", "tokenizers/punkt_tab"),
+    ("averaged_perceptron_tagger_eng", "taggers/averaged_perceptron_tagger_eng"),
+    ("punkt", "tokenizers/punkt"),
+    ("stopwords", "corpora/stopwords"),
+    ("omw-1.4", "corpora/omw-1.4.zip"),  # 这个包下载后是 zip，不解压
+)
+
+
+def ensure_nltk_data(verbose: bool = False) -> None:
+    """检查 NLTK 资源，缺的自动下载（含代理与 SSL 修正）。
+
+    只在真的缺失时才联网；全部就绪时只做几次本地查找，几乎零开销。
+    没有网络时静默跳过，让原始报错暴露出来。
+    """
+    try:
+        import nltk
+        import nltk.data
+    except ImportError:
+        return
+
+    def present(probe: str) -> bool:
+        try:
+            nltk.data.find(probe)
+            return True
+        except LookupError:
+            return False
+
+    missing = [pkg for pkg, probe in _NLTK_REQUIRED if not present(probe)]
+    if not missing:
+        return
+
+    os.environ.setdefault("NLTK_ALLOW_PROXIED_URLOPEN", "1")
+    target = os.environ["NLTK_DATA"]
+    if verbose:
+        print(f"[bootstrap] NLTK 缺少 {len(missing)} 个资源，开始下载：{', '.join(missing)}")
+    for pkg in missing:
+        try:
+            ok = nltk.download(pkg, download_dir=target, quiet=True)
+            if verbose:
+                print(f"[bootstrap]   {pkg:32} {'ok' if ok else 'FAILED'}")
+        except Exception:
+            pass  # 下载失败就保持原样，让真实错误在调用方暴露
+
+
 load_env()
 sanitize_proxy_env()
 ensure_ssl_cert()
+ensure_data_dirs()
+ensure_nltk_data(verbose=bool(os.environ.get("RAG_VERBOSE")))
 
 
 

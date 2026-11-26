@@ -86,3 +86,8 @@ code/C4/*.db
 # 本机模型/NLTK 缓存与日志
 .cache/
 code/logs/
+
+# HF 缓存的兜底：如果某个脚本在 bootstrap 之前就 import 了 huggingface，
+# 缓存会掉到当前工作目录里（models--xxx/ 和 .locks/），这里一并忽略
+models--*/
+.locks/
